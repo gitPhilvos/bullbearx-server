@@ -88,7 +88,7 @@ app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res)
         await db.collection('users').doc(uid).update({ tier });
         console.log(`Updated user ${uid} to ${tier} tier`);
       }
-    }
+    } 
     res.json({ received: true });
   } catch (err) {
     console.error('Webhook processing error:', err);
