@@ -5,9 +5,13 @@ const Stripe = require('stripe');
 const admin = require('firebase-admin');
 const app = express();
 
-// Initialize Stripe
+// Initialize Stripe (replace this existing block)
 if (!process.env.STRIPE_SECRET_KEY) {
   throw new Error('STRIPE_SECRET_KEY is missing');
+}
+// Add this verification:
+if (!process.env.STRIPE_SECRET_KEY.startsWith('sk_')) {
+  throw new Error('Invalid Stripe secret key format. Must start with sk_');
 }
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
