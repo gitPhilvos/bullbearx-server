@@ -5,10 +5,14 @@ const Stripe = require('stripe');
 const admin = require('firebase-admin');
 const app = express();
 
-// Initialize Stripe and Firebase
+// Initialize Stripe with error handling
+if (!process.env.STRIPE_SECRET_KEY) {
+  throw new Error('STRIPE_SECRET_KEY is missing in environment variables');
+}
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-const serviceAccount = require('./firebaseServiceAccount.json');
 
+// Initialize Firebase
+const serviceAccount = require('./firebaseServiceAccount.json');
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });
@@ -16,12 +20,11 @@ const db = admin.firestore();
 
 // Middleware
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-  credentials: true
+  origin: process.env.FRONTEND_URL || 'http://localhost:5173'
 }));
 app.use(express.json());
 
-// Health check endpoint
+// Health check
 app.get('/ping', (req, res) => res.send('pong'));
 
 // Create Checkout Session
@@ -29,15 +32,23 @@ app.post('/create-checkout-session', async (req, res) => {
   try {
     const { email, tier, uid } = req.body;
     
+    // Validate input
     if (!email || !tier || !uid) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    const priceId = getPriceId(tier);
+    // Get price ID from tier
+    const priceId = {
+      basic: process.env.STRIPE_PRICE_ID_BASIC,
+      pro: process.env.STRIPE_PRICE_ID_PRO,
+      elite: process.env.STRIPE_PRICE_ID_ELITE
+    }[tier];
+
     if (!priceId) {
       return res.status(400).json({ error: 'Invalid tier specified' });
     }
 
+    // Create Stripe session
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       mode: 'subscription',
@@ -48,19 +59,19 @@ app.post('/create-checkout-session', async (req, res) => {
       metadata: { uid, tier }
     });
 
-    res.json({ url: session.url });
+    res.json({ sessionId: session.id });
   } catch (err) {
     console.error('Checkout error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Stripe Webhook Handler
+// Webhook handler
 app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
   const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
-  let event;
 
+  let event;
   try {
     event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
   } catch (err) {
@@ -69,15 +80,14 @@ app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res)
   }
 
   try {
-    switch (event.type) {
-      case 'checkout.session.completed':
-        await handleCheckoutSession(event.data.object);
-        break;
-      case 'invoice.payment_succeeded':
-        await handlePaymentSucceeded(event.data.object);
-        break;
-      default:
-        console.log(`Unhandled event type: ${event.type}`);
+    if (event.type === 'checkout.session.completed') {
+      const session = event.data.object;
+      const { uid, tier } = session.metadata;
+      
+      if (uid && tier) {
+        await db.collection('users').doc(uid).update({ tier });
+        console.log(`Updated user ${uid} to ${tier} tier`);
+      }
     }
     res.json({ received: true });
   } catch (err) {
@@ -86,41 +96,7 @@ app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res)
   }
 });
 
-// Helper Functions
-function getPriceId(tier) {
-  const prices = {
-    basic: process.env.STRIPE_PRICE_ID_BASIC,
-    pro: process.env.STRIPE_PRICE_ID_PRO,
-    elite: process.env.STRIPE_PRICE_ID_ELITE
-  };
-  return prices[tier.toLowerCase()];
-}
-
-async function handleCheckoutSession(session) {
-  const { uid, tier } = session.metadata;
-  if (!uid || !tier) {
-    throw new Error('Missing metadata in checkout session');
-  }
-  await updateUserTier(uid, tier);
-  console.log(`User ${uid} upgraded to ${tier} tier`);
-}
-
-async function handlePaymentSucceeded(invoice) {
-  // Handle recurring payments if needed
-  console.log(`Payment succeeded for subscription ${invoice.subscription}`);
-}
-
-async function updateUserTier(uid, tier) {
-  try {
-    await db.collection('users').doc(uid).update({ tier });
-    console.log(`Updated user ${uid} to ${tier} tier`);
-  } catch (err) {
-    console.error('Firestore update error:', err);
-    throw err;
-  }
-}
-
-// Start Server
+// Start server
 const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
