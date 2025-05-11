@@ -1,83 +1,98 @@
-require('dotenv').config();
-const path = require('path');
-const fs = require('fs');
 const express = require('express');
 const cors = require('cors');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const dotenv = require('dotenv');
+const Stripe = require('stripe');
 const admin = require('firebase-admin');
+const fs = require('fs');
 
-// ======================
-// 1. SERVICE ACCOUNT LOADER
-// ======================
-const serviceAccountDir = __dirname;
-const possibleFileNames = [
-  'service-account.json',        // Default name
-  'firebaseServiceAccount.json', // Your current file
-  'firebase-adminsdk.json',      // Common alternative
-  'firebase-credentials.json'    // Another common name
-];
+// Load .env variables
+dotenv.config();
 
-let serviceAccount = null;
-let usedFileName = '';
+// Init Express + Stripe
+const app = express();
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// Try all possible filenames
-for (const fileName of possibleFileNames) {
-  const fullPath = path.join(serviceAccountDir, fileName);
-  if (fs.existsSync(fullPath)) {
-    try {
-      serviceAccount = require(fullPath);
-      usedFileName = fileName;
-      console.log(`✓ Loaded Firebase service account from: ${fileName}`);
-      break;
-    } catch (e) {
-      console.warn(`⚠️ Found but couldn't load ${fileName}:`, e.message);
+// ✅ Firebase Admin Setup
+const serviceAccount = require('./firebaseServiceAccount.json');
+admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+const db = admin.firestore();
+
+// ✅ Stripe Webhook Middleware FIRST
+app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    const event = JSON.parse(req.body.toString());
+
+    console.log('📩 Webhook event received:', event.type);
+
+    if (event.type === 'checkout.session.completed') {
+      const session = event.data.object;
+      const email = session.customer_email || session.metadata?.email;
+      const tier = session.metadata?.tier || 'pro';
+
+      console.log(`✅ Payment complete → ${email} upgraded to ${tier}`);
+      await updateUserTier(email, tier);
     }
+
+    res.status(200).json({ received: true });
+  } catch (err) {
+    console.error('❌ Webhook parsing failed:', err.message);
+    res.status(400).send('Invalid webhook');
+  }
+});
+
+// ✅ Normal middleware AFTER webhook
+app.use(cors());
+app.use(express.json());
+
+// ✅ Test route
+app.get('/ping', (req, res) => {
+  res.send('pong');
+});
+
+// ✅ Create Checkout Session
+app.post('/create-checkout-session', async (req, res) => {
+  const { email, tier } = req.body;
+
+  const priceId = {
+    basic: process.env.STRIPE_PRICE_ID_BASIC,
+    pro: process.env.STRIPE_PRICE_ID_PRO,
+    elite: process.env.STRIPE_PRICE_ID_ELITE
+  }[tier];
+
+  if (!priceId) return res.status(400).send('Invalid tier.');
+
+  const session = await stripe.checkout.sessions.create({
+    payment_method_types: ['card'],
+    mode: 'subscription',
+    line_items: [{ price: priceId, quantity: 1 }],
+    customer_email: email,
+    success_url: `${process.env.APP_BASE_URL}/dashboard`,
+    cancel_url: `${process.env.APP_BASE_URL}/dashboard`,
+    metadata: { email, tier }
+  });
+
+  res.send({ url: session.url });
+});
+
+// ✅ Update user tier in Firestore
+async function updateUserTier(email, tier) {
+  try {
+    const snapshot = await db.collection('users').where('email', '==', email).get();
+    if (snapshot.empty) {
+      console.log('⚠️ No Firestore user found for:', email);
+      return;
+    }
+
+    snapshot.forEach(async (docRef) => {
+      await docRef.ref.update({ tier });
+      console.log(`🔁 Firestore updated: ${email} → ${tier}`);
+    });
+  } catch (err) {
+    console.error('🔥 Failed to update Firestore:', err.message);
   }
 }
 
-// Fallback to environment variables if no file found
-if (!serviceAccount && process.env.FIREBASE_PRIVATE_KEY) {
-  console.log('ℹ️ Using Firebase config from environment variables');
-  serviceAccount = {
-    type: 'service_account',
-    project_id: process.env.FIREBASE_PROJECT_ID,
-    private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
-    private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-    client_email: process.env.FIREBASE_CLIENT_EMAIL,
-    client_id: process.env.FIREBASE_CLIENT_ID,
-    auth_uri: 'https://accounts.google.com/o/oauth2/auth',
-    token_uri: 'https://oauth2.googleapis.com/token',
-    auth_provider_x509_cert_url: 'https://www.googleapis.com/oauth2/v1/certs',
-    client_x509_cert_url: process.env.FIREBASE_CLIENT_CERT_URL
-  };
-}
-
-// Final verification
-if (!serviceAccount) {
-  console.error('❌ No valid Firebase service account found. Tried:');
-  console.log(possibleFileNames.map(n => `- ${n}`).join('\n'));
-  console.log('Current directory files:', fs.readdirSync(serviceAccountDir));
-  process.exit(1);
-}
-
-// ======================
-// 2. FIREBASE INITIALIZATION
-// ======================
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  databaseURL: process.env.FIREBASE_DATABASE_URL
+// ✅ Start the server
+app.listen(4242, () => {
+  console.log('✅ Stripe server running on http://localhost:4242');
 });
-console.log('✓ Firebase initialized successfully');
-
-// ======================
-// 3. EXPRESS SERVER SETUP 
-// (Include all the Stripe webhook handlers from previous examples)
-// ======================
-const app = express();
-app.use(cors({ origin: true }));
-app.use(express.json());
-
-// ... [Include all your Stripe endpoints and webhook handlers here] ...
-
-const PORT = process.env.PORT || 4242;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
