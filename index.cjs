@@ -9,16 +9,15 @@ dotenv.config()
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY)
 const app = express()
 
-// ✅ First: set up raw body only for /webhook
+// ✅ Temporarily allow raw body and manual parsing for testing
 app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
-  const sig = req.headers['stripe-signature']
   let event
 
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET)
+    event = JSON.parse(req.body) // 🔁 TEMPORARY: allow curl tests without signature
   } catch (err) {
-    console.error('❌ Webhook error:', err.message)
-    return res.status(400).send(`Webhook Error: ${err.message}`)
+    console.error('❌ Invalid JSON body:', err.message)
+    return res.status(400).send(`Invalid body`)
   }
 
   console.log('📩 Incoming webhook received:', event.type)
@@ -35,15 +34,21 @@ app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
   res.status(200).json({ received: true })
 })
 
-// ✅ Then use these for normal routes
+// ✅ Normal middlewares
 app.use(cors())
 app.use(express.json())
+app.get('/ping', (req, res) => {
+  console.log('✅ /ping route hit')
+  res.send('pong')
+})
 
 // ✅ Firebase Admin setup
 const serviceAccount = JSON.parse(fs.readFileSync('./firebaseServiceAccount.json', 'utf-8'))
+
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 })
+
 const db = admin.firestore()
 
 // ✅ Create Checkout Session
@@ -71,7 +76,7 @@ app.post('/create-checkout-session', async (req, res) => {
   res.send({ url: session.url })
 })
 
-// ✅ Helper to update Firestore tier
+// ✅ Firestore updater
 async function updateUserTier(email, tier) {
   try {
     const snapshot = await db.collection('users').where('email', '==', email).get()
