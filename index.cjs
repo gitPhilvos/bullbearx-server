@@ -1,95 +1,127 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const dotenv = require('dotenv');
 const Stripe = require('stripe');
 const admin = require('firebase-admin');
-const fs = require('fs');
-
-dotenv.config();
-
-// Initialize Stripe and Express
 const app = express();
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// Firebase Admin Setup
+// Initialize Stripe and Firebase
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const serviceAccount = require('./firebaseServiceAccount.json');
-admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
 const db = admin.firestore();
 
-// Middleware to parse the raw body for Stripe Webhook
-app.use(cors());
+// Middleware
+app.use(cors({
+  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  credentials: true
+}));
 app.use(express.json());
 
-// ✅ Webhook to receive Stripe events
+// Health check endpoint
+app.get('/ping', (req, res) => res.send('pong'));
+
+// Create Checkout Session
+app.post('/create-checkout-session', async (req, res) => {
+  try {
+    const { email, tier, uid } = req.body;
+    
+    if (!email || !tier || !uid) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const priceId = getPriceId(tier);
+    if (!priceId) {
+      return res.status(400).json({ error: 'Invalid tier specified' });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      mode: 'subscription',
+      line_items: [{ price: priceId, quantity: 1 }],
+      customer_email: email,
+      success_url: `${process.env.FRONTEND_URL}/dashboard?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL}/dashboard?canceled=true`,
+      metadata: { uid, tier }
+    });
+
+    res.json({ url: session.url });
+  } catch (err) {
+    console.error('Checkout error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Stripe Webhook Handler
 app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
+  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
   let event;
 
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-    console.log('📩 Webhook received:', event.type);
+    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
   } catch (err) {
-    console.error('❌ Webhook signature verification failed:', err.message);
+    console.error('Webhook verification failed:', err);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  if (event.type === 'checkout.session.completed') {
-    const session = event.data.object;
-    const customerEmail = session.customer_email || session.metadata?.email;
-    const tier = session.metadata?.tier || 'pro';
-
-    console.log(`✅ Payment complete → ${customerEmail} upgraded to ${tier}`);
-    await updateUserTier(customerEmail, tier); // Update Firestore with new tier
+  try {
+    switch (event.type) {
+      case 'checkout.session.completed':
+        await handleCheckoutSession(event.data.object);
+        break;
+      case 'invoice.payment_succeeded':
+        await handlePaymentSucceeded(event.data.object);
+        break;
+      default:
+        console.log(`Unhandled event type: ${event.type}`);
+    }
+    res.json({ received: true });
+  } catch (err) {
+    console.error('Webhook processing error:', err);
+    res.status(500).json({ error: err.message });
   }
-
-  res.status(200).json({ received: true });
 });
 
-// ✅ Create Checkout Session (Stripe)
-app.post('/create-checkout-session', async (req, res) => {
-  const { email, tier } = req.body;
-
-  const priceId = {
+// Helper Functions
+function getPriceId(tier) {
+  const prices = {
     basic: process.env.STRIPE_PRICE_ID_BASIC,
     pro: process.env.STRIPE_PRICE_ID_PRO,
     elite: process.env.STRIPE_PRICE_ID_ELITE
-  }[tier];
+  };
+  return prices[tier.toLowerCase()];
+}
 
-  if (!priceId) return res.status(400).send('Invalid tier.');
+async function handleCheckoutSession(session) {
+  const { uid, tier } = session.metadata;
+  if (!uid || !tier) {
+    throw new Error('Missing metadata in checkout session');
+  }
+  await updateUserTier(uid, tier);
+  console.log(`User ${uid} upgraded to ${tier} tier`);
+}
 
-  const session = await stripe.checkout.sessions.create({
-    payment_method_types: ['card'],
-    mode: 'subscription',
-    line_items: [{ price: priceId, quantity: 1 }],
-    customer_email: email,
-    success_url: `${process.env.APP_BASE_URL}/dashboard`,
-    cancel_url: `${process.env.APP_BASE_URL}/dashboard`,
-    metadata: { email, tier }
-  });
+async function handlePaymentSucceeded(invoice) {
+  // Handle recurring payments if needed
+  console.log(`Payment succeeded for subscription ${invoice.subscription}`);
+}
 
-  res.send({ url: session.url });
-});
-
-// ✅ Firestore updater function to update the user's tier
-async function updateUserTier(email, tier) {
+async function updateUserTier(uid, tier) {
   try {
-    const snapshot = await db.collection('users').where('email', '==', email).get();
-
-    if (snapshot.empty) {
-      console.log('⚠️ No user found with email:', email);
-      return;
-    }
-
-    snapshot.forEach(async (docRef) => {
-      await docRef.ref.update({ tier });
-      console.log(`🔁 Firestore updated: ${email} → ${tier}`);
-    });
+    await db.collection('users').doc(uid).update({ tier });
+    console.log(`Updated user ${uid} to ${tier} tier`);
   } catch (err) {
-    console.error('🔥 Firestore update failed:', err.message);
+    console.error('Firestore update error:', err);
+    throw err;
   }
 }
 
-// Start the server on port 4242
-app.listen(4242, () => {
-  console.log('✅ Stripe server running on http://localhost:4242');
+// Start Server
+const PORT = process.env.PORT || 4242;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
