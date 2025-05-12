@@ -89,6 +89,7 @@ app.post('/create-checkout-session', async (req, res) => {
   }
 });
 
+
 // Start server
 const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => {
