@@ -1,3 +1,6 @@
+// ===========================
+// ✅ BACKEND: index.cjs
+// ===========================
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -6,22 +9,25 @@ const admin = require('firebase-admin');
 
 const app = express();
 
-// ✅ Validate Stripe Secret
+// ✅ Stripe Setup
 if (!process.env.STRIPE_SECRET_KEY || !process.env.STRIPE_SECRET_KEY.startsWith('sk_')) {
   throw new Error('❌ STRIPE_SECRET_KEY is missing or invalid');
 }
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// ✅ Firebase Setup
+// ✅ Firebase Admin Setup
 const serviceAccount = require('./firebaseServiceAccount.json');
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
 
 // ✅ Middleware
-app.use(cors({ origin: process.env.FRONTEND_URL }));
+app.use(cors({
+  origin: ['http://localhost:5173', process.env.FRONTEND_URL],
+  credentials: true,
+}));
 app.use(express.json());
 
-// ✅ Create Checkout Session
+// ✅ Stripe Checkout Session
 app.post('/create-checkout-session', async (req, res) => {
   const { email, tier, uid } = req.body;
 
@@ -42,7 +48,7 @@ app.post('/create-checkout-session', async (req, res) => {
       customer_email: email,
       success_url: `${process.env.FRONTEND_URL}/dashboard?success=true`,
       cancel_url: `${process.env.FRONTEND_URL}/dashboard?canceled=true`,
-      metadata: { uid, tier }
+      metadata: { uid, tier },
     });
 
     res.json({ sessionId: session.id });
@@ -52,10 +58,11 @@ app.post('/create-checkout-session', async (req, res) => {
   }
 });
 
-// ✅ Stripe Webhook (optional — for updating Firestore after successful payment)
+// ✅ Webhook for Stripe Events
 app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
     const event = JSON.parse(req.body.toString());
+
     if (event.type === 'checkout.session.completed') {
       const { metadata, customer_email } = event.data.object;
       if (metadata?.uid && metadata?.tier) {
@@ -71,8 +78,8 @@ app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res)
   }
 });
 
-// ✅ Start Server
+// ✅ Server Start
 const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => {
-  console.log(`✅ Server running on http://localhost:${PORT}`);
+  console.log(`✅ Backend running at http://localhost:${PORT}`);
 });
