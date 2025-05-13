@@ -14,6 +14,10 @@ admin.initializeApp({
 });
 const db = admin.firestore();
 
+const optionDataRoutes = require('./routes/optionData');
+app.use('/api', optionDataRoutes);
+
+
 // ✅ Stripe Webhook must use raw parser FIRST
 app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   let event;
