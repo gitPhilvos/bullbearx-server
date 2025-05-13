@@ -1,6 +1,3 @@
-// ===========================
-// ✅ BACKEND: index.cjs
-// ===========================
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -8,26 +5,48 @@ const Stripe = require('stripe');
 const admin = require('firebase-admin');
 
 const app = express();
-
-// ✅ Stripe Setup
-if (!process.env.STRIPE_SECRET_KEY || !process.env.STRIPE_SECRET_KEY.startsWith('sk_')) {
-  throw new Error('❌ STRIPE_SECRET_KEY is missing or invalid');
-}
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// ✅ Firebase Admin Setup
+// ✅ Firebase
 const serviceAccount = require('./firebaseServiceAccount.json');
-admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
 const db = admin.firestore();
 
-// ✅ Middleware
-app.use(cors({
-  origin: ['http://localhost:5173', process.env.FRONTEND_URL],
-  credentials: true,
-}));
+// ✅ Stripe Webhook must use raw parser FIRST
+app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  let event;
+  try {
+    event = JSON.parse(req.body.toString());
+    console.log('📩 Webhook event:', event.type);
+
+    if (event.type === 'checkout.session.completed') {
+      const { metadata, customer_email } = event.data.object;
+
+      if (metadata?.uid && metadata?.tier) {
+        await db.collection('users').doc(metadata.uid).update({ tier: metadata.tier });
+        console.log(`✅ Updated ${customer_email} to ${metadata.tier}`);
+      } else {
+        console.log('⚠️ Missing UID or tier in metadata');
+      }
+    }
+
+    res.status(200).json({ received: true });
+  } catch (err) {
+    console.error('❌ Webhook error:', err.message);
+    res.status(400).send('Webhook error');
+  }
+});
+
+// ✅ JSON middleware AFTER webhook
+app.use(cors({ origin: process.env.FRONTEND_URL }));
 app.use(express.json());
 
-// ✅ Stripe Checkout Session
+// ✅ Ping
+app.get('/ping', (req, res) => res.send('pong'));
+
+// ✅ Create Checkout Session
 app.post('/create-checkout-session', async (req, res) => {
   const { email, tier, uid } = req.body;
 
@@ -36,6 +55,7 @@ app.post('/create-checkout-session', async (req, res) => {
   }
 
   const priceId = process.env[`STRIPE_PRICE_ID_${tier.toUpperCase()}`];
+
   if (!priceId) {
     return res.status(400).json({ error: `Invalid tier: ${tier}` });
   }
@@ -53,33 +73,13 @@ app.post('/create-checkout-session', async (req, res) => {
 
     res.json({ sessionId: session.id });
   } catch (err) {
-    console.error('❌ Stripe session error:', err);
-    res.status(500).json({ error: err.message });
+    console.error('❌ Stripe session error:', err.message);
+    res.status(500).json({ error: 'Failed to create session' });
   }
 });
 
-// ✅ Webhook for Stripe Events
-app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  try {
-    const event = JSON.parse(req.body.toString());
-
-    if (event.type === 'checkout.session.completed') {
-      const { metadata, customer_email } = event.data.object;
-      if (metadata?.uid && metadata?.tier) {
-        await db.collection('users').doc(metadata.uid).update({ tier: metadata.tier });
-        console.log(`✅ Updated ${customer_email} to ${metadata.tier}`);
-      }
-    }
-
-    res.status(200).json({ received: true });
-  } catch (err) {
-    console.error('❌ Webhook error:', err.message);
-    res.status(400).send('Webhook error');
-  }
-});
-
-// ✅ Server Start
+// ✅ Start Server
 const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => {
-  console.log(`✅ Backend running at http://localhost:${PORT}`);
+  console.log(`✅ Server running at http://localhost:${PORT}`);
 });
