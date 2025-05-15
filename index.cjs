@@ -42,6 +42,35 @@ app.use('/api', optionDataRoutes);
      res.status(400).send('Webhook error');
    }
  });
+// app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
+//   const sig = req.headers['stripe-signature'];
+//   let event;
+
+//   try {
+//     event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+//     console.log('📩 Webhook verified:', event.type);
+//   } catch (err) {
+//     console.error('❌ Webhook signature failed:', err.message);
+//     return res.status(400).send(`Webhook Error: ${err.message}`);
+//   }
+
+//   // ✅ Handle event
+//   if (event.type === 'checkout.session.completed') {
+//     const { metadata, customer_email } = event.data.object;
+
+//     if (metadata?.uid && metadata?.tier) {
+//       db.collection('users').doc(metadata.uid).update({ tier: metadata.tier })
+//         .then(() => {
+//           console.log(`✅ Upgraded ${customer_email} to ${metadata.tier}`);
+//         })
+//         .catch(err => {
+//           console.error('❌ Firebase update error:', err.message);
+//         });
+//     }
+//   }
+
+//   res.status(200).json({ received: true });
+// });
 
 
 // ✅ JSON middleware AFTER webhook
