@@ -19,29 +19,59 @@ app.use('/api', optionDataRoutes);
 
 
 // ✅ Stripe Webhook must use raw parser FIRST
-app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+// app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+//   let event;
+//   try {
+//     event = JSON.parse(req.body.toString());
+//     console.log('📩 Webhook event:', event.type);
+
+//     if (event.type === 'checkout.session.completed') {
+//       const { metadata, customer_email } = event.data.object;
+
+//       if (metadata?.uid && metadata?.tier) {
+//         await db.collection('users').doc(metadata.uid).update({ tier: metadata.tier });
+//         console.log(`✅ Updated ${customer_email} to ${metadata.tier}`);
+//       } else {
+//         console.log('⚠️ Missing UID or tier in metadata');
+//       }
+//     }
+
+//     res.status(200).json({ received: true });
+//   } catch (err) {
+//     console.error('❌ Webhook error:', err.message);
+//     res.status(400).send('Webhook error');
+//   }
+// });
+app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
+  const sig = req.headers['stripe-signature'];
   let event;
+
   try {
-    event = JSON.parse(req.body.toString());
-    console.log('📩 Webhook event:', event.type);
-
-    if (event.type === 'checkout.session.completed') {
-      const { metadata, customer_email } = event.data.object;
-
-      if (metadata?.uid && metadata?.tier) {
-        await db.collection('users').doc(metadata.uid).update({ tier: metadata.tier });
-        console.log(`✅ Updated ${customer_email} to ${metadata.tier}`);
-      } else {
-        console.log('⚠️ Missing UID or tier in metadata');
-      }
-    }
-
-    res.status(200).json({ received: true });
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    console.log('📩 Webhook verified:', event.type);
   } catch (err) {
-    console.error('❌ Webhook error:', err.message);
-    res.status(400).send('Webhook error');
+    console.error('❌ Webhook signature failed:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
   }
+
+  // ✅ Handle event
+  if (event.type === 'checkout.session.completed') {
+    const { metadata, customer_email } = event.data.object;
+
+    if (metadata?.uid && metadata?.tier) {
+      db.collection('users').doc(metadata.uid).update({ tier: metadata.tier })
+        .then(() => {
+          console.log(`✅ Upgraded ${customer_email} to ${metadata.tier}`);
+        })
+        .catch(err => {
+          console.error('❌ Firebase update error:', err.message);
+        });
+    }
+  }
+
+  res.status(200).json({ received: true });
 });
+
 
 // ✅ JSON middleware AFTER webhook
 app.use(cors({ origin: process.env.FRONTEND_URL }));
